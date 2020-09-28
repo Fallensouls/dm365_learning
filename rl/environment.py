@@ -4,6 +4,7 @@
 import os
 import logging
 import random
+import torch
 
 _logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class RandomEnvironment(object):
         """
         if action == -1:
             _c_index = self.current_index
-            self.current_index = self._sample_index()
+            # self.current_index = self._sample_index()
 
             return self.train_x[_c_index], 0
 
@@ -37,15 +38,24 @@ class RandomEnvironment(object):
 
         return self.train_x[self.current_index], reward_value
 
+    def random(self):
+        self.current_index = self._sample_index()
+
     def reward(self, action):
         c = self.train_y[self.current_index]
-        return 1 if c.cpu().detach().numpy() == action else -1
+        # print(c.cpu().detach().numpy(), action)
+        return 1 if c == action else -1
 
     def sample_actions(self):
-        return random.randint(0, self.action_space)
+        return torch.tensor([[random.randint(0, self.action_space)]], dtype=torch.long).cuda()
 
     def _sample_index(self):
         return random.randint(0, len(self.train_y) - 1)
+    
+    def offer_sample(self):
+        _c_index = self.current_index
+        self.current_index = self._sample_index()
+        return self.train_x[_c_index], self.train_y[_c_index]
 
 
 class LinearEnvironment(object):

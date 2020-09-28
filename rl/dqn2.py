@@ -13,45 +13,6 @@ import matplotlib.pyplot as plt
 import cifar100
 import math
 
-class DeepQ(nn.Module):
-    def __init__(
-            self,
-            n_actions,
-            n_features=512,
-            hidden=128
-    ):
-        super(DeepQ, self).__init__()
-        self.layer = nn.Sequential(
-            nn.Linear(2048, 512),
-            nn.ReLU(),
-            nn.Linear(512, 128),
-            nn.ReLU(),
-            nn.Linear(128, n_actions)
-        )
-
-    def forward(self, x, actions_one_hot):
-        # q_outputs
-        x = self.layer(x)  # shape: (B, 10)
-        self.q_outputs = x
-        # x = x[torch.arange(len(x)), torch.argmax(actions_one_hot, -1)]
-        x = actions_one_hot.mul(x) # shape: (B, 10)
-        x = torch.sum(x, dim=1, keepdims=True) # shape: (B, 1)
-        return x
-
-
-class DeepQResnet(nn.Module):
-    def __init__(self):
-        super(DeepQResnet, self).__init__()
-        # self.conv = nn.Conv2d(1, 3, kernel_size=1)
-        model = models.resnet50(pretrained=True)
-        model.fc = nn.Identity()
-        self.resnet = model
-
-    def forward(self, x): 
-        # x= self.conv(x)
-        x = self.resnet(x)
-        return x
-
 class Resnet18(nn.Module):
     def __init__(self, n_actions=10):
         super(Resnet18, self).__init__()
@@ -59,48 +20,12 @@ class Resnet18(nn.Module):
         model.fc = nn.Linear(512, n_actions)
         self.net = model
     
-    def forward(self, x, actions_one_hot):
+    def forward(self, x):
         x = self.net(x)
-        self.q_outputs = x
-        x = actions_one_hot.mul(x) # shape: (B, 10)
-        x = torch.sum(x, dim=1, keepdims=True) # shape: (B, 1)
-        return x
-
-class MnistDeepQ(nn.Module):
-    def __init__(
-            self,
-            n_actions,
-            n_features=512,
-            hidden=128
-    ):
-        super(MnistDeepQ, self).__init__()
-        self.layer = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(512, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, n_actions)
-        )
-
-    def forward(self, x, actions_one_hot):
-        # q_outputs
-        x = self.layer(x)  # shape: (B, 10)
-        x = F.softmax(x, dim=1)
-        self.q_outputs = x
-        # x = x[torch.arange(len(x)), torch.argmax(actions_one_hot, -1)]
-        x = actions_one_hot.mul(x) # shape: (B, 10)
-        x = torch.sum(x, dim=1, keepdims=True) # shape: (B, 1)
         return x
 
 Transition = namedtuple('Transition',
-                        ('state', 'action', 'old_q', 'reward', 'next_state'))
+                        ('state', 'action', 'reward', 'next_state'))
 
 class ReplayMemory(object):
 
@@ -154,7 +79,6 @@ class DQN():
         self.batch_size = batch_size
         self.learn_step_counter = 0
         self.memory = ReplayMemory(self.memory_size)
-        self.supervised_memory = ReplayMemory(1000)
         self.cost_his = []
         self.feature_extractor = feature_extractor.cuda() if feature_extractor is not None else None
         self.eval_net, self.target_net = net, net
@@ -162,8 +86,8 @@ class DQN():
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=learning_rate)
 
     # memory
-    def remember(self, state, action, old_q, reward, next_state):
-        self.memory.push(state, action, old_q, reward, next_state)
+    def remember(self, state, action, reward, next_state):
+        self.memory.push(state, action, reward, next_state)
 
     def random_sample(self):
         return self.memory.sample(self.batch_size)
@@ -173,13 +97,8 @@ class DQN():
         for i in range(self.pre_remember_num):
             rd_action = env.sample_actions()
             next_state, reward = env.step(rd_action)
-            self.remember(state, rd_action, 0, reward, next_state)
+            self.remember(state, rd_action, reward, next_state)
             state = next_state
-            # state, label = env.offer_sample()
-            # next_state, reward = env.step(label.cpu().detach().numpy())
-            # print(reward)
-            # self.remember(state, label.cpu().detach().numpy(), 0, reward, next_state)
-            
 
     def epsilon_calc(self, step, ep_decay=0.0001, esp_total=1000):
         return max(self.epsilon_min, self.epsilon_max - (self.epsilon_max - self.epsilon_min) * step / esp_total)
@@ -190,27 +109,18 @@ class DQN():
     def select_action(self, env, state, step, ep_decay=0.0001, ep_total=1000):
         # epsilon = self.epsilon_calc(step, ep_decay, ep_total)
         epsilon = self.epsilon_calc2(step)
-        if np.random.rand() < 1.0:
-            return env.sample_actions(), 0
-        dummy_actions = torch.ones((1, self.n_actions)).cuda()
-        if self.feature_extractor is not None:
-            self.feature_extractor.eval()
-            features = self.feature_extractor(state.reshape(1, *state.shape))
-            q_values = self.eval_net(features, dummy_actions)
-            q_outputs = self.eval_net.q_outputs
-        else:
-            self.eval_net.eval()
-            q_values = self.eval_net(state.reshape(1, *state.shape), dummy_actions)
-            q_outputs = self.eval_net.q_outputs
-        return torch.argmax(q_outputs).cpu().detach().numpy(), torch.max(q_outputs).cpu().detach().numpy()  # 返回q值最大的action和对应的q值
+        if np.random.rand() < epsilon:
+            return env.sample_actions()    
+        self.eval_net.eval()
+        q_outputs = self.eval_net(state.reshape(1, *state.shape))
+        return q_outputs.max(1)[1].view(1, 1)
 
     def predict(self, states):
         if self.feature_extractor is not None:
             self.feature_extractor.eval()
             states = self.feature_extractor(states)
         self.eval_net.eval()
-        q_values = self.eval_net(states, torch.ones((len(states), self.n_actions)).cuda())
-        q_outputs = self.eval_net.q_outputs
+        q_outputs = self.eval_net(states)
         return torch.argmax(q_outputs, axis=1).cpu().detach().numpy()
 
     def learn(self):
@@ -226,35 +136,31 @@ class DQN():
         # TODO: 尝试构造具有关联性质的state
         batch = Transition(*zip(*samples))
         states = [x.unsqueeze(0) for x in batch.state]
-        states, actions, old_q, rewards = (torch.cat(states), np.array(batch.action).reshape(-1, 1),
-                                           np.array(batch.old_q).reshape(-1, 1),
-                                           np.array(batch.reward).reshape(-1, 1))
+        states = torch.cat(states)
+        action_batch = torch.cat(batch.action)
+        reward_batch = np.array(batch.reward).reshape(-1, 1)
+        
+        # next_state = [x.unsqueeze(0) for x in batch.next_state]
+        # non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+        #                                   batch.next_state)), device=device, dtype=torch.bool)
 
-        actions = torch.from_numpy(actions).reshape(-1)
-        # print(actions)
-        actions_one_hot = torch.nn.functional.one_hot(actions, self.n_actions).cuda()
-        # print(actions_one_hot)
-
-        # print(states.shape,actions.shape,old_q.shape,rewards.shape,actions_one_hot.shape)
-        # 从actor获取下一个状态的q估计值 这里也没用 因为gamma=0 也就是不对bellman方程展开
-
-        # inputs_ = [next_states,np.ones((replay_size,num_actions))]
-        # qvalues = actor_q_model.predict(inputs_)
-
-        # q = np.max(qvalues, axis=1, keepdims=True)
-        q = 0
-        # 应用Bellman方程对Q进行更新，将新的Q更新给critic（方程9）
-        q_estimate = (1 - alpha) * old_q + alpha * (rewards.reshape(-1, 1) + gamma * q)
-        q_estimate = torch.from_numpy(q_estimate).float().to(device)
-        # 训练估计模型
-        if self.feature_extractor is not None:
-            states = self.feature_extractor(states)
+        # non_final_next_states = torch.cat([s.unsqueeze(0) for s in batch.next_state
+        #                                         if s is not None])
+        # # print(states.shape)
+        # print(non_final_next_states.shape)
+        # next_state_values = torch.zeros(self.batch_size).cuda()
+        # next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
+        # print(next_state_values.shape)
         self.eval_net.train()
-        q_val = self.eval_net(states, actions_one_hot)
-        print('q_output:{}'.format(self.eval_net.q_outputs))
-        print('q_val:{}'.format(q_val))
-        print('q_estimate:{}'.format(q_estimate))
-        loss = self.loss_fn(q_val, q_estimate)
+        state_action_values = self.eval_net(states).gather(1, action_batch)
+        reward = torch.from_numpy(reward_batch).float().cuda()
+        expected_state_action_values = reward
+        # print(expected_state_action_values.shape)
+        # print(reward.squeeze(1).shape)
+        # print('q_output:{}'.format(self.eval_net.q_outputs))
+        # print('q_val:{}'.format(q_val))
+        # print('q_estimate:{}'.format(q_estimate))
+        loss = self.loss_fn(state_action_values, expected_state_action_values)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -285,43 +191,13 @@ def custom_load_mnist_data(file_path='mnist.npz'):
 
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
-    # (x_train, y_train), (x_test, y_test) = custom_load_mnist_data()  # tf.keras.datasets.mnist.load_data()
-    # num_actions = len(set(y_test))
-    # image_w, image_h = x_train.shape[1:]
-
-    # x_train = x_train.reshape(*x_train.shape, 1)
-    # x_test = x_test.reshape(*x_test.shape, 1)
-    # # normalization
-    # x_train = x_train/255.0
-    # x_test = x_test/255.0
-
-    # x_train = torch.from_numpy(x_train).float().to(device)
-    # x_test = torch.from_numpy(x_test).float().to(device)
-    # x_train = x_train.permute(0, 3, 1, 2)
-    # x_test = x_test.permute(0, 3, 1, 2)
-    # env = MnistEnvironment(x_train, y_train)
-
-    # y_train = torch.from_numpy(y_train)
-    # y_test = torch.from_numpy(y_test)
-    # y_train_one_hot = torch.nn.functional.one_hot(y_train.to(torch.int64), num_classes=num_actions).to(device)
-    # y_test_one_hot = torch.nn.functional.one_hot(y_test.to(torch.int64), num_classes=num_actions).to(device)
-
-    # # test_image = x_train[0]
-    # # plt.imshow(test_image.reshape(28, 28), 'gray')
-    # # plt.show()
-    # # plt.close()
-    # print(x_train.shape)
-    # print(x_test.shape)
-    # print('example num of train set: {}'.format(len(x_train)))
-    # print('example num of test set: {}'.format(len(x_test)))
 
     import time
     num_actions = 10
     replay_size = 128
-    epoches = 1
+    epoches = 100
     pre_train_num = 256
-    gamma = 0
+    gamma = 0.9
     alpha = 0.9
     forward = 512
     epislon_total = 5120
@@ -340,9 +216,6 @@ if __name__ == "__main__":
     print(x_test.shape)
     env = RandomEnvironment(x_train, y_train, num_actions)
 
-    feature_extractor=DeepQResnet()
-    for param in feature_extractor.parameters():
-        param.requires_grad = False
     net = Resnet18()
     dqn = DQN(num_actions, n_features=512, feature_extractor=None, gamma=gamma, net=net)
     dqn.eval_net.to(device)
@@ -360,22 +233,22 @@ if __name__ == "__main__":
         epoch_start = time.time()
         for step in range(forward):
             # 对每个状态使用epsilon_greedy选择
-            action, q = dqn.select_action(env, state, steps_done, ep_total=epislon_total)
+            action = dqn.select_action(env, state, steps_done, ep_total=epislon_total)
             eps = dqn.epsilon_calc2(steps_done)
             steps_done += 1
             # eps = dqn.epsilon_calc(steps_done, esp_total=epislon_total)
             
             next_state, reward = env.step(action)
             # 加入到经验记忆中
-            dqn.remember(state, action, q, reward, next_state)
+            dqn.remember(state, action, reward, next_state)
 
             loss = dqn.learn()
 
             total_rewards += reward
             state = next_state
-            
+           
             pbar.set_description('R:{} L:{:.4f} T:{} P:{:.3f}'.format(total_rewards, loss,
-                                                                  int(time.time() - epoch_start), eps))
+                                                                    int(time.time() - epoch_start), eps))
         from sklearn.metrics import accuracy_score
         pred = dqn.predict(x_test)
         print('test accuracy: {}'.format(accuracy_score(y_test.cpu().detach().numpy(), pred)))
